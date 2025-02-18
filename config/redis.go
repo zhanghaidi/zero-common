@@ -5,76 +5,65 @@ import (
 	"crypto/tls"
 	"errors"
 	"github.com/redis/go-redis/v9"
+	"github.com/zeromicro/go-zero/core/logx"
 	"strings"
 	"time"
 )
 
+// A RedisConf is a redis config.
 type RedisConf struct {
-	Host       string `json:",default=127.0.0.1:6379"`
-	Db         int    `json:",default=0"`
-	Username   string `json:",optional"`
-	Pass       string `json:",optional"` // 可选的密码字段
-	Tls        bool   `json:",optional"`
-	MasterName string `json:",optional"`
-	PoolSize   int    `json:",optional,default=10"`
+	Host     string `json:",env=REDIS_HOST"`
+	Db       int    `json:",default=0,env=REDIS_DB"`
+	Username string `json:",optional,env=REDIS_USERNAME"`
+	Pass     string `json:",optional,env=REDIS_PASSWORD"`
+	Tls      bool   `json:",optional,env=REDIS_TLS"`
+	Master   string `json:",optional,env=REDIS_MASTER"`
 }
 
-// Validate 验证 Redis 配置是否正确
 func (r RedisConf) Validate() error {
-	if r.Host == "" {
-		return errors.New("RedisHost不能为空")
+	if len(r.Host) == 0 {
+		return errors.New("host cannot be empty")
 	}
 	return nil
 }
 
-// NewRedisClient 创建 Redis 客户端
-func (r RedisConf) NewRedisClient() (redis.UniversalClient, error) {
+func (r RedisConf) NewUniversalRedis() (redis.UniversalClient, error) {
 	err := r.Validate()
 	if err != nil {
 		return nil, err
 	}
 
 	opt := &redis.UniversalOptions{
-		Addrs:        strings.Split(r.Host, ","),
-		DB:           r.Db,
-		Username:     r.Username,
-		PoolSize:     r.PoolSize,
-		ReadTimeout:  3 * time.Second,
-		WriteTimeout: 3 * time.Second,
+		Addrs:    strings.Split(r.Host, ","),
+		DB:       r.Db,
+		Password: r.Pass,
+		Username: r.Username,
 	}
 
-	// 仅在 Pass 不为空时设置密码
-	if r.Pass != "" {
-		opt.Password = r.Pass
+	if r.Master != "" {
+		opt.MasterName = r.Master
 	}
 
-	// 如果有 MasterName，则设置主节点名称
-	if r.MasterName != "" {
-		opt.MasterName = r.MasterName
-	}
-
-	// 启用 TLS 配置（可选）
 	if r.Tls {
 		opt.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	}
 
-	client := redis.NewUniversalClient(opt)
+	rds := redis.NewUniversalClient(opt)
 
-	// 测试连接
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := client.Ping(ctx).Err(); err != nil {
+
+	err = rds.Ping(ctx).Err()
+	if err != nil {
 		return nil, err
 	}
 
-	return client, nil
+	return rds, nil
 }
 
-// MustNewRedisClient 必须创建 Redis 客户端，若失败则直接 panic
-func (r RedisConf) MustNewRedisClient() redis.UniversalClient {
-	client, err := r.NewRedisClient()
-	if err != nil {
-		panic(err)
-	}
-	return client
+func (r RedisConf) MustNewUniversalRedis() redis.UniversalClient {
+	rds, err := r.NewUniversalRedis()
+	logx.Must(err)
+
+	return rds
 }
