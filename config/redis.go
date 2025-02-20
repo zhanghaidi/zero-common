@@ -6,6 +6,7 @@ import (
 	"errors"
 	"github.com/redis/go-redis/v9"
 	"github.com/zeromicro/go-zero/core/logx"
+	"github.com/zhanghaidi/zero-common/define"
 	"strings"
 	"time"
 )
@@ -57,6 +58,8 @@ func (r RedisConf) NewUniversalRedis() (redis.UniversalClient, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	define.GlobalRedis = rds // 设置全局Redis变量
 
 	return rds, nil
 }
