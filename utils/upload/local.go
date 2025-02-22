@@ -128,91 +128,135 @@ func (l *LocalUploader) UploadFile(objectKey string, reader io.Reader) (string, 
 	return objectKey, nil
 }
 
-// CopyFolder 复制目录及其内容
-func (l *LocalUploader) CopyFolder(srcFolder, newFolder string) error {
-	err := filepath.Walk(srcFolder, func(path string, info os.FileInfo, err error) error {
+// CopyFolder 复制文件夹
+func (l *LocalUploader) CopyFolder(srcFolder, destFolder string) error {
+	absSrc := filepath.Join(l.directory, srcFolder)
+	absDest := filepath.Join(l.directory, destFolder)
+
+	// 确保源目录存在
+	if _, err := os.Stat(absSrc); os.IsNotExist(err) {
+		return fmt.Errorf("源目录不存在: %q", absSrc)
+	}
+
+	return filepath.WalkDir(absSrc, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return fmt.Errorf("failed to access path %q: %w", path, err)
+			return fmt.Errorf("访问路径失败 %q: %w", path, err)
 		}
 
-		// 生成目标路径
-		relativePath, err := filepath.Rel(srcFolder, path)
+		relativePath, err := filepath.Rel(absSrc, path)
 		if err != nil {
-			return fmt.Errorf("failed to calculate relative path: %w", err)
+			return fmt.Errorf("计算相对路径失败: %w", err)
 		}
-		targetPath := filepath.Join(newFolder, relativePath)
+		targetPath := filepath.Join(absDest, relativePath)
 
-		if info.IsDir() {
-			// 创建目标目录
+		// 复制目录
+		if d.IsDir() {
+			info, err := os.Stat(path)
+			if err != nil {
+				return fmt.Errorf("获取目录信息失败: %w", err)
+			}
 			if err := os.MkdirAll(targetPath, info.Mode()); err != nil {
-				return fmt.Errorf("failed to create directory %q: %w", targetPath, err)
+				return fmt.Errorf("创建目录失败 %q: %w", targetPath, err)
 			}
-		} else {
-			// 复制文件
-			srcFile, err := os.Open(path)
-			if err != nil {
-				return fmt.Errorf("failed to open source file %q: %w", path, err)
-			}
-			defer srcFile.Close()
+			return nil
+		}
 
-			targetFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
-			if err != nil {
-				return fmt.Errorf("failed to create target file %q: %w", targetPath, err)
-			}
-			defer targetFile.Close()
+		// 复制文件
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("获取文件信息失败: %w", err)
+		}
 
-			if _, err := io.Copy(targetFile, srcFile); err != nil {
-				return fmt.Errorf("failed to copy content from %q to %q: %w", path, targetPath, err)
-			}
+		srcFile, err := os.Open(path)
+		if err != nil {
+			return fmt.Errorf("打开源文件失败 %q: %w", path, err)
+		}
+		defer srcFile.Close()
+
+		dstFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+		if err != nil {
+			return fmt.Errorf("创建目标文件失败 %q: %w", targetPath, err)
+		}
+		defer dstFile.Close()
+
+		_, err = io.Copy(dstFile, srcFile)
+		if err != nil {
+			return fmt.Errorf("复制文件失败 %q -> %q: %w", path, targetPath, err)
 		}
 
 		return nil
 	})
-
-	return err
 }
 
 // DeleteFolder 删除目录及其子文件，排除特定文件夹
 func (l *LocalUploader) DeleteFolder(folderPath string, exclude ...string) error {
-	excludeMap := make(map[string]struct{})
-	for _, e := range exclude {
-		absPath, err := filepath.Abs(filepath.Join(folderPath, e))
-		if err != nil {
-			return fmt.Errorf("failed to resolve exclude path %q: %w", e, err)
-		}
-		excludeMap[absPath] = struct{}{}
+	absFolder := filepath.Join(l.directory, folderPath)
+
+	// 确保删除路径在 l.directory 内
+	if !strings.HasPrefix(absFolder, filepath.Clean(l.directory)+string(os.PathSeparator)) {
+		return fmt.Errorf("删除路径不安全: %q 超出 %q", absFolder, l.directory)
 	}
 
-	err := filepath.Walk(folderPath, func(path string, info os.FileInfo, err error) error {
+	// 目录不存在时直接跳过
+	if _, err := os.Stat(absFolder); os.IsNotExist(err) {
+		fmt.Printf("Warning: 目录不存在, 跳过删除: %s\n", absFolder)
+		return nil
+	}
+
+	// 处理排除列表
+	excludeMap := make(map[string]struct{})
+	for _, e := range exclude {
+		excludePath := filepath.Join(absFolder, e)
+		excludeMap[excludePath] = struct{}{}
+	}
+
+	// 先收集路径，确保删除顺序（先文件后目录）
+	var paths []string
+	err := filepath.WalkDir(absFolder, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return fmt.Errorf("failed to access path %q: %w", path, err)
+			if os.IsNotExist(err) {
+				fmt.Printf("Warning: 访问路径失败, 文件已不存在: %s\n", path)
+				return nil // 忽略文件不存在的错误
+			}
+			return fmt.Errorf("访问路径失败 %q: %w", path, err)
 		}
 
-		// 如果是排除的目录，跳过
-		if info.IsDir() {
-			if _, ok := excludeMap[path]; ok {
-				return filepath.SkipDir
-			}
-		}
-
-		// 删除文件或目录
-		if _, ok := excludeMap[path]; !ok {
-			if err := os.RemoveAll(path); err != nil {
-				return fmt.Errorf("failed to delete %q: %w", path, err)
-			}
-		}
+		// 记录路径（文件先，目录后）
+		paths = append(paths, path)
 		return nil
 	})
+	if err != nil {
+		return err
+	}
 
-	return err
+	// **逆序删除，确保先删文件再删目录**
+	for i := len(paths) - 1; i >= 0; i-- {
+		p := paths[i]
+
+		// 跳过排除项
+		if _, ok := excludeMap[p]; ok {
+			continue
+		}
+
+		if err := os.RemoveAll(p); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("删除失败 %q: %w", p, err)
+		}
+	}
+
+	return nil
 }
 
 // DeleteFile 删除本地文件
 func (l *LocalUploader) DeleteFile(objectKey string) error {
 	fullPath := filepath.Join(l.directory, objectKey)
-	err := os.Remove(fullPath) // 删除文件
-	if err != nil {
-		return fmt.Errorf("删除文件失败: %v", err)
+
+	// 确保文件路径在 l.directory 内
+	if !strings.HasPrefix(fullPath, filepath.Clean(l.directory)+string(os.PathSeparator)) {
+		return fmt.Errorf("删除路径不安全: %q 超出 %q", fullPath, l.directory)
+	}
+
+	if err := os.Remove(fullPath); err != nil {
+		return fmt.Errorf("删除文件失败: %w", err)
 	}
 	return nil
 }

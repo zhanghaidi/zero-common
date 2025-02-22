@@ -3,11 +3,12 @@ package config
 import (
 	"errors"
 	"fmt"
+	"github.com/zeromicro/go-zero/core/logx"
 	"github.com/zhanghaidi/zero-common/define"
 	"gorm.io/gorm/schema"
 	"io"
+	"log"
 	"os"
-	"path/filepath"
 	"time"
 
 	"gorm.io/driver/mysql"
@@ -31,13 +32,13 @@ type DatabaseConf struct {
 	ConnMaxLife   int    `json:",optional,default=3600,env=DATABASE_CONN_MAX_LIFE"`
 	Prefix        string `json:",default=cmf_,env=DATABASE_PREFIX"`
 	DBPath        string `json:",optional,env=DATABASE_DBPATH"`
-	LogMode       string `json:",default=error,env=DATABASE_LOG_MODE"`            // 日志级别
-	EnableLogFile bool   `json:",default=false,env=DATABASE_ENABLE_LOG_FILE"`     // 是否启用日志文件
-	LogFilePath   string `json:",default=logs/db.log,env=DATABASE_LOG_FILE_PATH"` // 日志文件路径
+	LogMode       string `json:",default=error,env=DATABASE_LOG_MODE"`        // 日志级别
+	EnableLogFile bool   `json:",default=false,env=DATABASE_ENABLE_LOG_FILE"` // 是否启用日志文件
+	LogFilename   string `json:",default=db.log,env=DATABASE_LOG_FILENAME"`   // 日志文件名称
 }
 
 // InitDatabase 初始化数据库连接
-func (c DatabaseConf) InitDatabase() (*gorm.DB, error) {
+func (c DatabaseConf) InitDatabase(conf logx.LogConf) (*gorm.DB, error) {
 	if err := c.Check(); err != nil {
 		return nil, fmt.Errorf("数据库配置错误: %v", err)
 	}
@@ -68,12 +69,12 @@ func (c DatabaseConf) InitDatabase() (*gorm.DB, error) {
 		DisableForeignKeyConstraintWhenMigrating: true, // 禁用自动创建外键约束
 		// 配置sql日志
 		Logger: logger.New(
-			newDBLogger(c.EnableLogFile, c.LogFilePath),
+			newGormLogger(c.EnableLogFile, c.LogFilename, conf), // 创建日志 Writer
 			logger.Config{
-				SlowThreshold:             500 * time.Millisecond,     // 慢 SQL 阈值
-				LogLevel:                  getGormLogLevel(c.LogMode), // 日志级别
-				IgnoreRecordNotFoundError: true,                       // 忽略 ErrRecordNotFound 错误
-				Colorful:                  !c.EnableLogFile,           // 是否禁用彩色打印
+				SlowThreshold:             500 * time.Millisecond, // 慢 SQL 阈值
+				LogLevel:                  getLogLevel(c.LogMode), // 日志级别
+				IgnoreRecordNotFoundError: true,                   // 忽略 ErrRecordNotFound 错误
+				Colorful:                  !c.EnableLogFile,       // 是否禁用彩色打印
 			}),
 	})
 	if err != nil {
@@ -136,8 +137,8 @@ func (c DatabaseConf) GetDSN() string {
 	}
 }
 
-// getGormLogLevel 根据配置获取 Gorm 日志级别
-func getGormLogLevel(logMode string) logger.LogLevel {
+// getLogLevel 根据配置获取 Gorm 日志级别
+func getLogLevel(logMode string) logger.LogLevel {
 	levels := map[string]logger.LogLevel{
 		"info":   logger.Info,
 		"warn":   logger.Warn,
@@ -151,34 +152,18 @@ func getGormLogLevel(logMode string) logger.LogLevel {
 	return logger.Error
 }
 
-type GormLogger struct {
-	writer io.Writer
-}
-
-// Printf 实现 GORM 的 logger.Writer 接口
-func (l GormLogger) Printf(format string, v ...interface{}) {
-	fmt.Fprintf(l.writer, format, v...)
-}
-
-func newDBLogger(enableFile bool, filePath string) logger.Writer {
+// newGormLogger 创建 Gorm 日志 Writer
+func newGormLogger(enableFile bool, filename string, conf logx.LogConf) logger.Writer {
+	var writer io.Writer
+	// 是否启用日志文件
 	if enableFile {
-		dir := filepath.Dir(filePath) // 取日志文件所在目录
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			fmt.Println("创建日志目录失败:", err)
-			return GormLogger{writer: os.Stdout}
-		}
-
-		// 尝试创建日志文件
-		file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil {
-			fmt.Println("创建日志文件失败:", err)
-			return GormLogger{writer: os.Stdout}
-		}
-
-		// 这里可以使用 log.New() 直接创建日志记录器
-		return GormLogger{writer: io.MultiWriter(file, os.Stdout)}
+		// 使用 go-zero 的日志功能创建日志文件 Writer
+		filePath := conf.Path + "/" + filename
+		writer, _ = logx.NewLogger(filePath, logx.DefaultRotateRule(filePath, "-", conf.KeepDays, conf.Compress), conf.Compress)
+	} else {
+		// 默认输出到控制台
+		writer = os.Stdout
 	}
 
-	// 默认输出到控制台
-	return GormLogger{writer: os.Stdout}
+	return log.New(writer, "\r\n", log.LstdFlags)
 }
